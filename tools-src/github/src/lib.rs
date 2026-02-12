@@ -40,7 +40,8 @@ fn url_encode_path(s: &str) -> String {
 }
 
 /// Percent-encode a string for use as a URL query parameter value.
-/// Same as path encoding but also encodes space as %20.
+/// Currently identical to `url_encode_path` and kept as a separate helper
+/// for clarity and potential future customization.
 fn url_encode_query(s: &str) -> String {
     url_encode_path(s)
 }
@@ -229,33 +230,28 @@ fn execute_inner(params: &str) -> Result<String, String> {
 }
 
 fn get_github_token() -> Result<String, String> {
-    // Check if secret exists first (for better error messages)
-    if !near::agent::host::secret_exists("github_token") {
-        return Err("GitHub token not configured. Set it with: ironclaw secret set github_token <token>".into());
-    }
-    
-    if let Some(val) = near::agent::host::workspace_read("github/token") {
+    if let Some(val) = near::agent::host::secret_get("github_token") {
         let trimmed = val.trim().to_string();
         if trimmed.is_empty() {
-            return Err("github/token is empty".into());
+            return Err("GitHub token secret is empty. Reset it with: ironclaw secret set github_token <token>".into());
         }
         return Ok(trimmed);
     }
-    Err("GitHub token not found. Store your Personal Access Token at \
-         github/token using memory_write. Token needs 'repo' and 'workflow' scopes."
-        .into())
+    
+    Err("GitHub token not found in secret store. Set it with: ironclaw secret set github_token <token>. \
+         Token needs 'repo', 'workflow', and 'read:org' scopes.".into())
 }
 
 fn github_request(
-    token: &str,
+    _token: &str,
     method: &str,
     path: &str,
     body: Option<String>,
 ) -> Result<String, String> {
     let url = format!("https://api.github.com{}", path);
-    
+
+    // Authorization header is injected automatically by the host based on capabilities
     let headers = serde_json::json!({
-        "Authorization": format!("Bearer {}", token),
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "IronClaw-GitHub-Tool"
@@ -286,13 +282,13 @@ fn github_request(
 
 // === API Functions ===
 
-fn get_repo(token: &str, owner: &str, repo: &str) -> Result<String, String> {
+fn get_repo(_token: &str, owner: &str, repo: &str) -> Result<String, String> {
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
     }
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
-    github_request(token, "GET", &format!("/repos/{}/{}", encoded_owner, encoded_repo), None)
+    github_request(_token, "GET", &format!("/repos/{}/{}", encoded_owner, encoded_repo), None)
 }
 
 fn list_issues(
@@ -314,7 +310,7 @@ fn list_issues(
         "/repos/{}/{}/issues?state={}&per_page={}",
         encoded_owner, encoded_repo, encoded_state, limit
     );
-    github_request(token, "GET", &path, None)
+    github_request(_token, "GET", &path, None)
 }
 
 fn create_issue(
@@ -386,7 +382,7 @@ fn list_pull_requests(
         "/repos/{}/{}/pulls?state={}&per_page={}",
         encoded_owner, encoded_repo, encoded_state, limit
     );
-    github_request(token, "GET", &path, None)
+    github_request(_token, "GET", &path, None)
 }
 
 fn get_pull_request(
@@ -445,21 +441,21 @@ fn create_pr_review(
         "body": body,
         "event": event,
     });
-    github_request(token, "POST", &path, Some(req_body.to_string()))
+    github_request(_token, "POST", &path, Some(req_body.to_string()))
 }
 
-fn list_repos(token: &str, username: &str, limit: Option<u32>) -> Result<String, String> {
+fn list_repos(_token: &str, username: &str, limit: Option<u32>) -> Result<String, String> {
     if !validate_path_segment(username) {
         return Err("Invalid username".into());
     }
     let encoded_username = url_encode_path(username);
     let limit = limit.unwrap_or(30).min(100); // Cap at 100
     let path = format!("/users/{}/repos?per_page={}", encoded_username, limit);
-    github_request(token, "GET", &path, None)
+    github_request(_token, "GET", &path, None)
 }
 
 fn get_file_content(
-    token: &str,
+    _token: &str,
     owner: &str,
     repo: &str,
     path: &str,
@@ -467,6 +463,18 @@ fn get_file_content(
 ) -> Result<String, String> {
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
+    }
+    // Validate path segments - reject path traversal attempts
+    for segment in path.split('/') {
+        if segment == ".." || segment.starts_with('.') {
+            return Err("Invalid path: path traversal not allowed".into());
+        }
+    }
+    // Validate ref if provided
+    if let Some(r#ref) = r#ref {
+        if r#ref.contains("..") || r#ref.contains('/') || r#ref.contains(':') {
+            return Err("Invalid ref: must be a valid branch, tag, or commit SHA".into());
+        }
     }
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
@@ -479,11 +487,11 @@ fn get_file_content(
     } else {
         format!("/repos/{}/{}/contents/{}", encoded_owner, encoded_repo, encoded_path)
     };
-    github_request(token, "GET", &url_path, None)
+    github_request(_token, "GET", &url_path, None)
 }
 
 fn trigger_workflow(
-    token: &str,
+    _token: &str,
     owner: &str,
     repo: &str,
     workflow_id: &str,
@@ -493,7 +501,14 @@ fn trigger_workflow(
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
     }
-    // workflow_id can be a filename with .yml extension
+    // Validate workflow_id - must be a safe filename
+    if workflow_id.contains('/') || workflow_id.contains("..") || workflow_id.contains(':') {
+        return Err("Invalid workflow_id: must be a filename or numeric ID".into());
+    }
+    // Validate ref - must be a valid git ref
+    if r#ref.contains("..") || r#ref.contains(':') || r#ref.starts_with('/') {
+        return Err("Invalid ref: must be a valid branch, tag, or commit SHA".into());
+    }
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
     let encoded_workflow_id = url_encode_path(workflow_id);
@@ -507,11 +522,11 @@ fn trigger_workflow(
     if let Some(inputs) = inputs {
         req_body["inputs"] = inputs;
     }
-    github_request(token, "POST", &path, Some(req_body.to_string()))
+    github_request(_token, "POST", &path, Some(req_body.to_string()))
 }
 
 fn get_workflow_runs(
-    token: &str,
+    _token: &str,
     owner: &str,
     repo: &str,
     workflow_id: Option<&str>,
@@ -519,6 +534,12 @@ fn get_workflow_runs(
 ) -> Result<String, String> {
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
+    }
+    // Validate workflow_id if provided
+    if let Some(wid) = workflow_id {
+        if wid.contains('/') || wid.contains("..") || wid.contains(':') {
+            return Err("Invalid workflow_id: must be a filename or numeric ID".into());
+        }
     }
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
@@ -535,7 +556,7 @@ fn get_workflow_runs(
             encoded_owner, encoded_repo, limit
         )
     };
-    github_request(token, "GET", &path, None)
+    github_request(_token, "GET", &path, None)
 }
 
 const SCHEMA: &str = r#"{

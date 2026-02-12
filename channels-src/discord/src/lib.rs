@@ -261,7 +261,7 @@ impl Guest for DiscordChannel {
 fn handle_slash_command(interaction: DiscordInteraction) {
     let user = interaction.member.as_ref().map(|m| &m.user).or(interaction.user.as_ref());
     let user_id = user.map(|u| u.id.clone()).unwrap_or_default();
-    let user_name = user.map(|u| u.global_name.as_ref().unwrap_or(&u.username).clone()).unwrap_or_default();
+    let user_name = user.map(|u| u.global_name.as_ref().filter(|s| !s.is_empty()).unwrap_or(&u.username).clone()).unwrap_or_default();
 
     let channel_id = interaction.channel_id.clone().unwrap_or_default();
 
@@ -286,7 +286,13 @@ fn handle_slash_command(interaction: DiscordInteraction) {
         thread_id: None,
     };
 
-    let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
+    let metadata_json = match serde_json::to_string(&metadata) {
+        Ok(json) => json,
+        Err(e) => {
+            channel_host::log(channel_host::LogLevel::Error, &format!("Failed to serialize metadata: {}", e));
+            return; // Don't emit message if metadata can't be serialized
+        }
+    };
 
     channel_host::emit_message(&EmittedMessage {
         user_id,
@@ -301,7 +307,7 @@ fn handle_message_component(interaction: DiscordInteraction, message: DiscordMes
     // Check member first (for server contexts), then user (for DMs)
     let user = interaction.member.as_ref().map(|m| &m.user).or(interaction.user.as_ref());
     let user_id = user.map(|u| u.id.clone()).unwrap_or_default();
-    let user_name = user.map(|u| u.global_name.as_ref().unwrap_or(&u.username).clone()).unwrap_or_default();
+    let user_name = user.map(|u| u.global_name.as_ref().filter(|s| !s.is_empty()).unwrap_or(&u.username).clone()).unwrap_or_default();
 
     let channel_id = message.channel_id.clone();
 
@@ -313,7 +319,13 @@ fn handle_message_component(interaction: DiscordInteraction, message: DiscordMes
         thread_id: None,
     };
 
-    let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
+    let metadata_json = match serde_json::to_string(&metadata) {
+        Ok(json) => json,
+        Err(e) => {
+            channel_host::log(channel_host::LogLevel::Error, &format!("Failed to serialize metadata: {}", e));
+            return; // Don't emit message if metadata can't be serialized
+        }
+    };
 
     channel_host::emit_message(&EmittedMessage {
         user_id,
